@@ -6,6 +6,11 @@ __pycache__/
 *.pyd
 *.log
 *.tmp
+.DS_Store
 .feishu_storage_state.json
 .playwright-cli/
+.playwright-browsers/
+.pytest_cache/
+build/
+dist/
 output/
