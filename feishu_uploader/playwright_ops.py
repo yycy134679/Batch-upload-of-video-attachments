@@ -166,6 +166,14 @@ def has_saved_login_state(state_file: Path, *, now_ts: float | None = None) -> b
     return False
 
 
+def clear_saved_login_state(state_file: Path) -> bool:
+    try:
+        state_file.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def is_login_page(page: Page) -> bool:
     url = page.url.lower()
     return any(

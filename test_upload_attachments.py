@@ -9,7 +9,7 @@ import upload_attachments as ua
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from feishu_uploader.gui import UploadWindow, build_gui_config
 from feishu_uploader import playwright_ops
@@ -260,6 +260,24 @@ class PlaywrightBootstrapTests(unittest.TestCase):
             )
             self.assertTrue(playwright_ops.has_saved_login_state(state_file, now_ts=100))
 
+    def test_clear_saved_login_state_removes_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / "storage_state.json"
+            state_file.write_text("{}", encoding="utf-8")
+
+            removed = playwright_ops.clear_saved_login_state(state_file)
+
+            self.assertTrue(removed)
+            self.assertFalse(state_file.exists())
+
+    def test_clear_saved_login_state_returns_false_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / "storage_state.json"
+
+            removed = playwright_ops.clear_saved_login_state(state_file)
+
+            self.assertFalse(removed)
+
     @mock.patch.object(playwright_ops, "sync_playwright", object())
     @mock.patch.object(playwright_ops, "playwright_browser_installed", return_value=True)
     @mock.patch.object(playwright_ops, "install_playwright_browser")
@@ -384,6 +402,19 @@ class GuiConfigTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def write_saved_login_state(self, state_file: Path) -> None:
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {"domain": ".feishu.cn", "expires": 4102444800},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_build_gui_config_maps_form_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -478,6 +509,95 @@ class GuiConfigTests(unittest.TestCase):
         self.assertFalse(window.start_button.isEnabled())
         self.assertEqual(window.summary_label.text(), "运行环境已就绪，请先点击“登录飞书”完成登录。")
         information.assert_called_once()
+
+    def test_window_runtime_ready_with_saved_state_enables_clear_login_button(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / "storage_state.json"
+            self.write_saved_login_state(state_file)
+
+            with mock.patch("feishu_uploader.gui.DEFAULT_STATE_FILE", state_file):
+                window = UploadWindow(auto_initialize_runtime=False)
+                self.addCleanup(window.close)
+
+                window.on_runtime_init_finished()
+
+                self.assertTrue(window.start_button.isEnabled())
+                self.assertTrue(window.clear_login_button.isEnabled())
+
+    @mock.patch("feishu_uploader.gui.QMessageBox.question", return_value=QMessageBox.StandardButton.Cancel)
+    def test_clear_login_flow_cancel_keeps_state_and_summary(
+        self,
+        question: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / "storage_state.json"
+            self.write_saved_login_state(state_file)
+
+            with mock.patch("feishu_uploader.gui.DEFAULT_STATE_FILE", state_file):
+                window = UploadWindow(auto_initialize_runtime=False)
+                self.addCleanup(window.close)
+                window.on_runtime_init_finished()
+
+                summary_before = window.summary_label.text()
+                window.clear_login_flow()
+
+                self.assertTrue(state_file.exists())
+                self.assertEqual(window.summary_label.text(), summary_before)
+                self.assertTrue(window.start_button.isEnabled())
+                question.assert_called_once()
+
+    @mock.patch("feishu_uploader.gui.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes)
+    def test_clear_login_flow_confirm_clears_state_and_disables_upload(
+        self,
+        question: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / "storage_state.json"
+            self.write_saved_login_state(state_file)
+
+            with mock.patch("feishu_uploader.gui.DEFAULT_STATE_FILE", state_file):
+                window = UploadWindow(auto_initialize_runtime=False)
+                self.addCleanup(window.close)
+                window.on_runtime_init_finished()
+
+                window.clear_login_flow()
+
+                self.assertFalse(state_file.exists())
+                self.assertEqual(window.summary_label.text(), "运行环境已就绪，请先点击“登录飞书”完成登录。")
+                self.assertTrue(window.login_button.isEnabled())
+                self.assertFalse(window.start_button.isEnabled())
+                self.assertFalse(window.clear_login_button.isEnabled())
+                self.assertIn("已清理本地飞书登录信息，可重新登录其他账号。", window.log_output.toPlainText())
+                question.assert_called_once()
+
+    @mock.patch("feishu_uploader.gui.QMessageBox.critical")
+    @mock.patch("feishu_uploader.gui.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes)
+    def test_clear_login_flow_delete_failure_shows_error_without_resetting_state(
+        self,
+        question: mock.Mock,
+        critical: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / "storage_state.json"
+            self.write_saved_login_state(state_file)
+
+            with (
+                mock.patch("feishu_uploader.gui.DEFAULT_STATE_FILE", state_file),
+                mock.patch("feishu_uploader.gui.clear_saved_login_state", side_effect=OSError("permission denied")),
+            ):
+                window = UploadWindow(auto_initialize_runtime=False)
+                self.addCleanup(window.close)
+                window.on_runtime_init_finished()
+
+                summary_before = window.summary_label.text()
+                window.clear_login_flow()
+
+                self.assertTrue(state_file.exists())
+                self.assertEqual(window.summary_label.text(), summary_before)
+                self.assertTrue(window.start_button.isEnabled())
+                self.assertIn("清理登录信息失败", window.log_output.toPlainText())
+                question.assert_called_once()
+                critical.assert_called_once()
 
     @mock.patch("feishu_uploader.gui.QThread.start", autospec=True)
     def test_window_can_start_runtime_initialization_from_pending_state(

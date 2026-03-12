@@ -20,6 +20,7 @@ from .constants import (
 )
 from .models import AppConfig, RunOutcome, UploadPlanItem, UploadResult
 from .playwright_ops import (
+    clear_saved_login_state,
     ensure_playwright_available,
     has_saved_login_state,
     login_to_feishu,
@@ -361,6 +362,8 @@ class UploadWindow(QMainWindow):
         actions.setSpacing(8)
         self.login_button = QPushButton("登录飞书")
         self.login_button.clicked.connect(self.start_login_flow)
+        self.clear_login_button = QPushButton("清理登录信息（切换账号）")
+        self.clear_login_button.clicked.connect(self.clear_login_flow)
         self.start_button = QPushButton("开始上传")
         self.start_button.clicked.connect(self.start_upload)
         self.retry_init_button = QPushButton("重新初始化")
@@ -370,6 +373,7 @@ class UploadWindow(QMainWindow):
         self.open_report_button.setEnabled(False)
         self.open_report_button.clicked.connect(self.open_latest_report_dir)
         actions.addWidget(self.login_button)
+        actions.addWidget(self.clear_login_button)
         actions.addWidget(self.start_button)
         actions.addWidget(self.retry_init_button)
         actions.addWidget(self.open_report_button)
@@ -416,12 +420,23 @@ class UploadWindow(QMainWindow):
         self.login_button.setEnabled(
             enabled and self._runtime_ready and not self._runtime_initializing and not self._login_in_progress
         )
+        self.clear_login_button.setEnabled(enabled and self._can_clear_login_state())
         self.start_button.setEnabled(
             enabled
             and self._runtime_ready
             and not self._runtime_initializing
             and not self._login_in_progress
             and self._has_saved_login
+        )
+
+    def _can_clear_login_state(self) -> bool:
+        upload_in_progress = self._thread is not None and self._thread.isRunning()
+        return (
+            self._runtime_ready
+            and not self._runtime_initializing
+            and not self._login_in_progress
+            and not upload_in_progress
+            and DEFAULT_STATE_FILE.resolve().exists()
         )
 
     def _refresh_login_state(self, *, notify: bool = False) -> None:
@@ -562,6 +577,43 @@ class UploadWindow(QMainWindow):
         self._login_worker.failed.connect(self._login_thread.quit)
         self._login_thread.finished.connect(self._cleanup_login_worker)
         self._login_thread.start()
+
+    def clear_login_flow(self) -> None:
+        if self._runtime_initializing or not self._runtime_ready:
+            QMessageBox.information(self, "运行环境未就绪", "请等待运行环境初始化完成后再清理登录信息。")
+            return
+        if self._login_in_progress:
+            QMessageBox.information(self, "正在登录", "飞书登录仍在进行中，请等待完成后再清理登录信息。")
+            return
+        if self._thread is not None and self._thread.isRunning():
+            QMessageBox.information(self, "任务仍在运行", "上传还在进行中，请等待任务结束后再清理登录信息。")
+            return
+
+        state_file = DEFAULT_STATE_FILE.resolve()
+        if not state_file.exists():
+            self._refresh_login_state(notify=False)
+            return
+
+        confirmed = QMessageBox.question(
+            self,
+            "清理登录信息",
+            "将删除本地保存的飞书登录信息，下次需要重新扫码登录。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            removed = clear_saved_login_state(state_file)
+        except OSError as exc:
+            self.append_log(f"[ERROR] 清理登录信息失败: {exc}")
+            QMessageBox.critical(self, "清理失败", f"无法清理本地飞书登录信息：{exc}")
+            return
+
+        if removed or not state_file.exists():
+            self.append_log("[INFO] 已清理本地飞书登录信息，可重新登录其他账号。")
+        self._refresh_login_state(notify=False)
 
     def on_login_finished(self) -> None:
         self._login_in_progress = False
