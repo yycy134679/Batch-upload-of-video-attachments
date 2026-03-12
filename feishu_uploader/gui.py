@@ -254,12 +254,13 @@ class UploadWindow(QMainWindow):
         self._row_by_cell: dict[str, int] = {}
 
         self.setWindowTitle(APP_NAME)
-        self.resize(980, 760)
+        self.resize(1120, 820)
+        self.setMinimumSize(980, 720)
 
         central = QWidget(self)
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
-        root_layout.setContentsMargins(20, 20, 20, 20)
+        root_layout.setContentsMargins(24, 20, 24, 24)
         root_layout.setSpacing(14)
 
         intro = QLabel("粘贴飞书表格地址，选择或拖入视频目录，再设置起始单元格后开始上传。")
@@ -272,27 +273,36 @@ class UploadWindow(QMainWindow):
             "QFrame { border: 1px solid #d7dce5; border-radius: 10px; background: #fbfcfe; }"
         )
         form_layout = QVBoxLayout(form_card)
-        form_layout.setContentsMargins(16, 16, 16, 16)
-        form_layout.setSpacing(12)
+        form_layout.setContentsMargins(18, 18, 18, 18)
+        form_layout.setSpacing(14)
 
         fields = QFormLayout()
         fields.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         fields.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        fields.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         fields.setHorizontalSpacing(12)
-        fields.setVerticalSpacing(10)
+        fields.setVerticalSpacing(12)
 
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("每次运行请粘贴飞书表格 URL")
+        self.url_input.setClearButtonEnabled(True)
+        self.url_input.setMinimumWidth(820)
+        self.url_input.setMinimumHeight(36)
         fields.addRow("表格地址", self.url_input)
 
         self.video_dir_input = DirectoryDropLineEdit()
         self.video_dir_input.directory_selected.connect(self._on_directory_selected)
+        self.video_dir_input.setClearButtonEnabled(True)
+        self.video_dir_input.setMinimumHeight(36)
+        self.video_dir_input.setMinimumWidth(820)
         self.video_dir_input.setStyleSheet(
-            "QLineEdit { border: 1px dashed #8ba1c7; padding: 6px; min-height: 34px; }"
+            "QLineEdit { border: 1px dashed #8ba1c7; padding: 6px 8px; min-height: 36px; }"
         )
 
         choose_button = QPushButton("选择目录")
         choose_button.clicked.connect(self.choose_directory)
+        choose_button.setMinimumHeight(36)
+        choose_button.setMinimumWidth(120)
 
         video_dir_row = QWidget()
         video_dir_layout = QHBoxLayout(video_dir_row)
@@ -310,27 +320,31 @@ class UploadWindow(QMainWindow):
         self.column_combo = QComboBox()
         self.column_combo.addItems([chr(code) for code in range(ord("A"), ord("Z") + 1)])
         self.column_combo.setCurrentText(DEFAULT_COLUMN)
-        self.column_combo.setMinimumWidth(90)
+        self.column_combo.setFixedWidth(96)
+        self.column_combo.setMinimumHeight(34)
 
         self.start_row_input = QSpinBox()
         self.start_row_input.setMinimum(1)
         self.start_row_input.setMaximum(999999)
         self.start_row_input.setValue(DEFAULT_START_ROW)
-        self.start_row_input.setMinimumWidth(120)
+        self.start_row_input.setFixedWidth(140)
+        self.start_row_input.setMinimumHeight(34)
 
         target_layout.addWidget(QLabel("列"))
         target_layout.addWidget(self.column_combo)
         target_layout.addWidget(QLabel("起始行"))
         target_layout.addWidget(self.start_row_input)
         target_layout.addStretch(1)
-        fields.addRow("提交位置", target_row)
 
         self.overwrite_checkbox = QCheckBox("允许覆盖已有附件")
+        fields.addRow("提交位置", target_row)
         fields.addRow("", self.overwrite_checkbox)
 
         self.run_mode_combo = QComboBox()
         self.run_mode_combo.addItem(format_browser_mode(False), False)
         self.run_mode_combo.addItem(format_browser_mode(True), True)
+        self.run_mode_combo.setMinimumWidth(280)
+        self.run_mode_combo.setMinimumHeight(34)
         fields.addRow("运行模式", self.run_mode_combo)
 
         self.run_mode_hint = QLabel(
@@ -365,15 +379,19 @@ class UploadWindow(QMainWindow):
 
         self.summary_label = QLabel("尚未开始上传。")
         self.summary_label.setStyleSheet("font-weight: 600;")
+        self.summary_label.setWordWrap(True)
         root_layout.addWidget(self.summary_label)
 
         self.progress_table = QTableWidget(0, 4)
         self.progress_table.setHorizontalHeaderLabels(["单元格", "文件名", "状态", "说明"])
+        self.progress_table.setAlternatingRowColors(True)
+        self.progress_table.verticalHeader().setVisible(False)
         header = self.progress_table.horizontalHeader()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         root_layout.addWidget(self.progress_table, stretch=1)
 
         log_title = QLabel("运行日志")
@@ -381,6 +399,7 @@ class UploadWindow(QMainWindow):
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setPlaceholderText("上传开始后，这里会显示浏览器登录提示、进度和结果。")
+        self.log_output.setMinimumHeight(180)
         root_layout.addWidget(self.log_output, stretch=1)
 
         self._enter_runtime_initializing_state()
