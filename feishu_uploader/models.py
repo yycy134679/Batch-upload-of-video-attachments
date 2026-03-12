@@ -64,3 +64,14 @@ class UploadResult:
             "cell_display_after": self.cell_display_after,
             "screenshot": self.screenshot,
         }
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    exit_code: int
+    run_dir: Path
+    summary_path: Path
+    started_at: str
+    ended_at: str
+    stats: dict[str, int]
+    results: tuple[UploadResult, ...]

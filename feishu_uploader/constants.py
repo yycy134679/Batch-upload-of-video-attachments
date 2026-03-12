@@ -1,15 +1,15 @@
-from pathlib import Path
 import re
 
+from .runtime import PACKAGE_DIR, PROJECT_ROOT, get_runtime_paths
 
-PACKAGE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = PACKAGE_DIR.parent
-DEFAULT_URL = "https://bytedance.larkoffice.com/wiki/GxGswlGQfiB0PSkL8ItcABlKnig"
+
+RUNTIME_PATHS = get_runtime_paths()
+BROWSER_DIR = RUNTIME_PATHS.browser_dir
 DEFAULT_COLUMN = "E"
 DEFAULT_START_ROW = 23
 DEFAULT_VIDEO_DIR = PROJECT_ROOT / "media"
-DEFAULT_STATE_FILE = PROJECT_ROOT / ".feishu_storage_state.json"
-DEFAULT_REPORT_DIR = PROJECT_ROOT / "output" / "reports"
+DEFAULT_STATE_FILE = RUNTIME_PATHS.state_file
+DEFAULT_REPORT_DIR = RUNTIME_PATHS.report_dir
 DEFAULT_LOGIN_TIMEOUT = 300
 DEFAULT_UPLOAD_TIMEOUT = 120
 DEFAULT_RETRIES = 2
