@@ -37,11 +37,16 @@ def format_size(size_bytes: int | None) -> str:
     return f"{size_bytes / (1024 * 1024):.1f}MB"
 
 
+def format_browser_mode(headless: bool) -> str:
+    return "后台运行（无头）" if headless else "前台运行（显示浏览器）"
+
+
 def print_run_header(config: AppConfig, plan: Sequence[UploadPlanItem], run_dir) -> None:
     print(f"[INFO] 目标表格: {config.url}")
     print(f"[INFO] 上传范围: {config.column}{config.start_row} 起，共 {len(plan)} 个文件槽位")
     print(f"[INFO] 登录态文件: {config.state_file}")
     print(f"[INFO] 运行报告目录: {run_dir}")
+    print(f"[INFO] 运行模式: {format_browser_mode(config.headless)}")
     if config.overwrite:
         print("[INFO] 当前模式: 允许覆盖已有内容")
     else:
@@ -58,6 +63,7 @@ def build_run_header_lines(
         f"[INFO] 上传范围: {config.column}{config.start_row} 起，共 {len(plan)} 个文件槽位",
         f"[INFO] 登录态文件: {config.state_file}",
         f"[INFO] 运行报告目录: {run_dir}",
+        f"[INFO] 运行模式: {format_browser_mode(config.headless)}",
     ]
     if config.overwrite:
         lines.append("[INFO] 当前模式: 允许覆盖已有内容")

@@ -395,6 +395,7 @@ class GuiConfigTests(unittest.TestCase):
                 column="E",
                 start_row=2,
                 overwrite=True,
+                headless=True,
             )
 
             self.assertEqual(config.url, "https://example.com/wiki/demo")
@@ -402,6 +403,7 @@ class GuiConfigTests(unittest.TestCase):
             self.assertEqual(config.column, "E")
             self.assertEqual(config.start_row, 2)
             self.assertTrue(config.overwrite)
+            self.assertTrue(config.headless)
 
     def test_build_gui_config_rejects_empty_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -415,6 +417,7 @@ class GuiConfigTests(unittest.TestCase):
                     column="E",
                     start_row=2,
                     overwrite=False,
+                    headless=False,
                 )
 
     def test_window_build_current_config_uses_widget_values(self) -> None:
@@ -429,6 +432,7 @@ class GuiConfigTests(unittest.TestCase):
             window.column_combo.setCurrentText("E")
             window.start_row_input.setValue(2)
             window.overwrite_checkbox.setChecked(True)
+            window.run_mode_combo.setCurrentIndex(1)
 
             config = window.build_current_config()
 
@@ -436,6 +440,14 @@ class GuiConfigTests(unittest.TestCase):
             self.assertEqual(config.column, "E")
             self.assertEqual(config.start_row, 2)
             self.assertTrue(config.overwrite)
+            self.assertTrue(config.headless)
+
+    def test_window_defaults_to_headful_upload_mode(self) -> None:
+        window = UploadWindow(auto_initialize_runtime=False)
+        self.addCleanup(window.close)
+
+        self.assertEqual(window.run_mode_combo.currentText(), "前台运行（显示浏览器）")
+        self.assertFalse(window.current_headless_mode())
 
     @mock.patch("feishu_uploader.gui.has_saved_login_state", return_value=True)
     def test_window_starts_with_form_disabled_until_runtime_ready(self, _has_login: mock.Mock) -> None:

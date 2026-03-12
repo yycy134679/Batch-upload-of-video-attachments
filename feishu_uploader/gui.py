@@ -71,6 +71,10 @@ STATUS_LABELS = {
 }
 
 
+def format_browser_mode(headless: bool) -> str:
+    return "后台运行（无头）" if headless else "前台运行（显示浏览器）"
+
+
 def build_gui_config(
     *,
     url: str,
@@ -78,6 +82,7 @@ def build_gui_config(
     column: str,
     start_row: int,
     overwrite: bool,
+    headless: bool,
 ) -> AppConfig:
     video_dir_text = video_dir.strip()
     if not video_dir_text:
@@ -94,7 +99,7 @@ def build_gui_config(
             upload_timeout=DEFAULT_UPLOAD_TIMEOUT,
             retries=DEFAULT_RETRIES,
             overwrite=overwrite,
-            headless=False,
+            headless=headless,
             files=None,
         )
     )
@@ -323,6 +328,19 @@ class UploadWindow(QMainWindow):
         self.overwrite_checkbox = QCheckBox("允许覆盖已有附件")
         fields.addRow("", self.overwrite_checkbox)
 
+        self.run_mode_combo = QComboBox()
+        self.run_mode_combo.addItem(format_browser_mode(False), False)
+        self.run_mode_combo.addItem(format_browser_mode(True), True)
+        fields.addRow("运行模式", self.run_mode_combo)
+
+        self.run_mode_hint = QLabel(
+            "前台运行会显示浏览器页面，便于观察上传过程；后台运行不会显示浏览器，更适合在不打扰当前操作时批量执行。"
+            "注意：点击“登录飞书”时始终会打开可见浏览器窗口，运行模式只影响开始上传后的执行方式。"
+        )
+        self.run_mode_hint.setWordWrap(True)
+        self.run_mode_hint.setStyleSheet("color: #5f6b7a;")
+        fields.addRow("", self.run_mode_hint)
+
         form_layout.addLayout(fields)
 
         actions = QHBoxLayout()
@@ -375,6 +393,7 @@ class UploadWindow(QMainWindow):
         self.column_combo.setEnabled(enabled)
         self.start_row_input.setEnabled(enabled)
         self.overwrite_checkbox.setEnabled(enabled)
+        self.run_mode_combo.setEnabled(enabled)
         self.login_button.setEnabled(
             enabled and self._runtime_ready and not self._runtime_initializing and not self._login_in_progress
         )
@@ -551,7 +570,11 @@ class UploadWindow(QMainWindow):
             column=self.column_combo.currentText(),
             start_row=self.start_row_input.value(),
             overwrite=self.overwrite_checkbox.isChecked(),
+            headless=self.current_headless_mode(),
         )
+
+    def current_headless_mode(self) -> bool:
+        return bool(self.run_mode_combo.currentData())
 
     def reset_progress_view(self) -> None:
         self._row_by_cell.clear()
@@ -582,6 +605,7 @@ class UploadWindow(QMainWindow):
         self.reset_progress_view()
         self._set_form_enabled(False)
         self.append_log("[INFO] 正在启动上传任务...")
+        self.append_log(f"[INFO] 运行模式: {format_browser_mode(config.headless)}")
 
         self._thread = QThread(self)
         self._worker = UploadWorker(config)
