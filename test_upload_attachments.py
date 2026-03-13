@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import tempfile
@@ -9,6 +10,7 @@ import upload_attachments as ua
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from feishu_uploader.gui import UploadWindow, build_gui_config
@@ -190,9 +192,122 @@ class SummaryTests(unittest.TestCase):
             )
 
             payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertFalse(payload["cancelled"])
+            self.assertEqual(payload["planned_count"], 2)
+            self.assertEqual(payload["processed_count"], 2)
+            self.assertEqual(payload["remaining_count"], 0)
             self.assertEqual(payload["stats"]["uploaded"], 1)
             self.assertEqual(payload["stats"]["skipped_missing"], 1)
             self.assertEqual(payload["results"][0]["cell"], "E23")
+
+
+class RunnerCancellationTests(unittest.TestCase):
+    def make_config(self, root: Path) -> ua.AppConfig:
+        return ua.AppConfig(
+            url="https://example.com/wiki/demo",
+            column="E",
+            start_row=23,
+            video_dir=root,
+            state_file=root / ".state.json",
+            report_dir=root / "reports",
+            login_timeout=300,
+            upload_timeout=120,
+            retries=2,
+            overwrite=False,
+            headless=False,
+            files=None,
+        )
+
+    @mock.patch("feishu_uploader.runner.ensure_playwright_available")
+    @mock.patch("feishu_uploader.runner.sync_playwright")
+    def test_run_stops_before_processing_when_stop_requested(
+        self,
+        sync_playwright: mock.Mock,
+        _ensure_playwright_available: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "1.mp4").write_bytes(b"demo")
+            logs: list[str] = []
+
+            outcome = ua.run(
+                self.make_config(root),
+                callbacks=ua.RunCallbacks(log=logs.append),
+                should_stop=lambda: True,
+            )
+
+            self.assertTrue(outcome.cancelled)
+            self.assertEqual(outcome.exit_code, 130)
+            self.assertEqual(outcome.planned_count, 1)
+            self.assertEqual(outcome.processed_count, 0)
+            self.assertEqual(outcome.remaining_count, 1)
+            self.assertEqual(outcome.results, ())
+            sync_playwright.assert_not_called()
+
+            payload = json.loads(outcome.summary_path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["cancelled"])
+            self.assertEqual(payload["processed_count"], 0)
+            self.assertEqual(payload["remaining_count"], 1)
+            self.assertTrue(any("开始处理前结束" in line for line in logs))
+
+    @mock.patch("feishu_uploader.runner.ensure_playwright_available")
+    @mock.patch("feishu_uploader.runner.wait_for_login")
+    @mock.patch("feishu_uploader.runner.upload_plan_item")
+    @mock.patch("feishu_uploader.runner.sync_playwright")
+    def test_run_stops_after_first_item_when_stop_requested(
+        self,
+        sync_playwright: mock.Mock,
+        upload_plan_item: mock.Mock,
+        _wait_for_login: mock.Mock,
+        _ensure_playwright_available: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "1.mp4").write_bytes(b"demo")
+            (root / "2.mp4").write_bytes(b"demo")
+            logs: list[str] = []
+            stop_requested = False
+
+            page = mock.Mock()
+            context = mock.Mock()
+            context.new_page.return_value = page
+            browser = mock.Mock()
+            browser.new_context.return_value = context
+            playwright = mock.Mock()
+            playwright.chromium.launch.return_value = browser
+            sync_playwright.return_value = contextlib.nullcontext(playwright)
+
+            def fake_upload_plan_item(*args, **kwargs):
+                nonlocal stop_requested
+                stop_requested = True
+                result = args[2]
+                result.status = "uploaded"
+                result.ended_at = "2026-03-13T10:00:03+08:00"
+                result.duration_sec = 3.0
+                return result
+
+            upload_plan_item.side_effect = fake_upload_plan_item
+
+            outcome = ua.run(
+                self.make_config(root),
+                callbacks=ua.RunCallbacks(log=logs.append),
+                should_stop=lambda: stop_requested,
+            )
+
+            self.assertTrue(outcome.cancelled)
+            self.assertEqual(outcome.exit_code, 130)
+            self.assertEqual(outcome.planned_count, 2)
+            self.assertEqual(outcome.processed_count, 1)
+            self.assertEqual(outcome.remaining_count, 1)
+            self.assertEqual(len(outcome.results), 1)
+            self.assertEqual(outcome.results[0].status, "uploaded")
+            upload_plan_item.assert_called_once()
+            self.assertTrue(any("E24" in line for line in logs))
+
+            payload = json.loads(outcome.summary_path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["cancelled"])
+            self.assertEqual(payload["processed_count"], 1)
+            self.assertEqual(payload["remaining_count"], 1)
 
 
 class RuntimePathTests(unittest.TestCase):
@@ -395,6 +510,64 @@ class PlaywrightSheetUiTests(unittest.TestCase):
 
         self.assertEqual(result, "fallback.mp4")
         page.evaluate.assert_called_once()
+
+
+class PlaywrightUploadCancellationTests(unittest.TestCase):
+    @mock.patch.object(playwright_ops, "utc_now", return_value="2026-03-13T10:00:00+08:00")
+    @mock.patch.object(playwright_ops, "take_failure_screenshot", return_value=Path("/tmp/failure.png"))
+    @mock.patch.object(playwright_ops, "refresh_sheet")
+    @mock.patch.object(playwright_ops, "recover_page_state")
+    @mock.patch.object(playwright_ops, "upload_file_once", side_effect=RuntimeError("boom"))
+    @mock.patch.object(playwright_ops, "read_selected_cell_display", return_value="")
+    @mock.patch.object(playwright_ops, "navigate_to_cell")
+    def test_upload_plan_item_stops_retry_when_stop_requested(
+        self,
+        _navigate_to_cell: mock.Mock,
+        _read_selected_cell_display: mock.Mock,
+        upload_file_once: mock.Mock,
+        recover_page_state: mock.Mock,
+        refresh_sheet: mock.Mock,
+        take_failure_screenshot: mock.Mock,
+        _utc_now: mock.Mock,
+    ) -> None:
+        page = mock.Mock()
+        plan_item = ua.UploadPlanItem(
+            index=0,
+            cell="E23",
+            file_path=Path("/tmp/1.mp4"),
+            file_name="1.mp4",
+            size_bytes=1024,
+            exists=True,
+        )
+        result = ua.UploadResult(
+            index=0,
+            cell="E23",
+            file_name="1.mp4",
+            file_path="/tmp/1.mp4",
+            size_bytes=1024,
+            started_at="2026-03-13T09:59:57+08:00",
+        )
+
+        returned = playwright_ops.upload_plan_item(
+            page,
+            plan_item,
+            result,
+            overwrite=False,
+            upload_timeout=120,
+            retries=2,
+            login_timeout=300,
+            run_dir=Path("/tmp"),
+            should_stop=lambda: True,
+        )
+
+        self.assertEqual(returned.status, "failed")
+        self.assertEqual(returned.reason, "boom")
+        self.assertEqual(returned.attempt_count, 1)
+        self.assertEqual(returned.screenshot, "/tmp/failure.png")
+        upload_file_once.assert_called_once()
+        recover_page_state.assert_called_once()
+        refresh_sheet.assert_not_called()
+        take_failure_screenshot.assert_called_once()
 
 
 class GuiConfigTests(unittest.TestCase):
@@ -623,6 +796,147 @@ class GuiConfigTests(unittest.TestCase):
         self.assertFalse(window.start_button.isEnabled())
         self.assertFalse(window.retry_init_button.isHidden())
         self.assertEqual(window.summary_label.text(), "运行环境初始化失败，请重试或退出应用。")
+
+    @mock.patch("feishu_uploader.gui.has_saved_login_state", return_value=True)
+    @mock.patch("feishu_uploader.gui.QThread.start", autospec=True)
+    def test_start_upload_enables_stop_button(
+        self,
+        _thread_start: mock.Mock,
+        _has_login: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "1.mp4").write_bytes(b"demo")
+            window = UploadWindow(auto_initialize_runtime=False)
+            self.addCleanup(window.close)
+            window._runtime_ready = True
+            window._runtime_initializing = False
+            window._has_saved_login = True
+            window.url_input.setText("https://example.com/wiki/demo")
+            window.video_dir_input.setText(str(root))
+            window.column_combo.setCurrentText("E")
+            window.start_row_input.setValue(23)
+
+            window.start_upload()
+
+            self.assertFalse(window.start_button.isEnabled())
+            self.assertTrue(window.stop_button.isEnabled())
+            self.assertIsNotNone(window._worker)
+
+    def test_stop_upload_requests_safe_stop_and_updates_summary(self) -> None:
+        window = UploadWindow(auto_initialize_runtime=False)
+        self.addCleanup(window.close)
+        self.addCleanup(setattr, window, "_thread", None)
+        thread = mock.Mock()
+        thread.isRunning.return_value = True
+        worker = mock.Mock()
+        window._thread = thread
+        window._worker = worker
+        window.stop_button.setEnabled(True)
+
+        window.stop_upload()
+
+        worker.request_stop.assert_called_once()
+        self.assertTrue(window._upload_stop_requested)
+        self.assertFalse(window.stop_button.isEnabled())
+        self.assertEqual(window.summary_label.text(), "正在等待当前文件处理完成后终止...")
+        self.assertIn("已收到终止上传请求", window.log_output.toPlainText())
+
+    def test_on_run_finished_marks_pending_rows_as_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "reports" / "run-1"
+            run_dir.mkdir(parents=True)
+            summary_path = run_dir / "summary.json"
+            summary_path.write_text("{}", encoding="utf-8")
+
+            window = UploadWindow(auto_initialize_runtime=False)
+            self.addCleanup(window.close)
+            window._runtime_ready = True
+            window._has_saved_login = True
+            window._set_form_enabled(True)
+            window._set_upload_stop_state(True)
+
+            plan = [
+                ua.UploadPlanItem(
+                    index=0,
+                    cell="E23",
+                    file_path=Path("/tmp/1.mp4"),
+                    file_name="1.mp4",
+                    size_bytes=1024,
+                    exists=True,
+                ),
+                ua.UploadPlanItem(
+                    index=1,
+                    cell="E24",
+                    file_path=Path("/tmp/2.mp4"),
+                    file_name="2.mp4",
+                    size_bytes=1024,
+                    exists=True,
+                ),
+            ]
+            window.on_run_started(plan, str(run_dir))
+            window.on_item_finished(
+                ua.UploadResult(
+                    index=0,
+                    cell="E23",
+                    file_name="1.mp4",
+                    file_path="/tmp/1.mp4",
+                    size_bytes=1024,
+                    status="uploaded",
+                ),
+                2,
+            )
+
+            outcome = ua.RunOutcome(
+                exit_code=130,
+                cancelled=True,
+                run_dir=run_dir,
+                summary_path=summary_path,
+                started_at="2026-03-13T10:00:00+08:00",
+                ended_at="2026-03-13T10:00:03+08:00",
+                planned_count=2,
+                processed_count=1,
+                remaining_count=1,
+                stats={"uploaded": 1},
+                results=(
+                    ua.UploadResult(
+                        index=0,
+                        cell="E23",
+                        file_name="1.mp4",
+                        file_path="/tmp/1.mp4",
+                        size_bytes=1024,
+                        status="uploaded",
+                    ),
+                ),
+            )
+
+            window.on_run_finished(outcome)
+
+            self.assertEqual(window.summary_label.text(), "已终止：上传成功 1，未处理 1 个")
+            self.assertEqual(window.progress_table.item(0, 2).text(), "上传成功")
+            self.assertEqual(window.progress_table.item(1, 2).text(), "已终止")
+            self.assertEqual(window.progress_table.item(1, 3).text(), "用户终止，未开始处理")
+            self.assertFalse(window.stop_button.isEnabled())
+
+    @mock.patch("feishu_uploader.gui.QMessageBox.information")
+    def test_close_event_shows_stop_waiting_message_after_stop_requested(
+        self,
+        information: mock.Mock,
+    ) -> None:
+        window = UploadWindow(auto_initialize_runtime=False)
+        self.addCleanup(window.close)
+        self.addCleanup(setattr, window, "_thread", None)
+        thread = mock.Mock()
+        thread.isRunning.return_value = True
+        window._thread = thread
+        window._upload_stop_requested = True
+        event = QCloseEvent()
+
+        window.closeEvent(event)
+
+        information.assert_called_once()
+        self.assertIn("正在等待当前文件处理完成后终止", information.call_args.args[2])
+        self.assertFalse(event.isAccepted())
 
 
 if __name__ == "__main__":

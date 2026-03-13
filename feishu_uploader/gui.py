@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from threading import Event
 
 from .runtime import APP_NAME, BUNDLE_IDENTIFIER, configure_runtime_environment, resource_path
 
@@ -64,6 +65,7 @@ except ModuleNotFoundError as exc:
 STATUS_LABELS = {
     "pending": "等待中",
     "running": "上传中",
+    "cancelled": "已终止",
     "uploaded": "上传成功",
     "skipped_existing": "跳过已有内容",
     "overwritten": "覆盖成功",
@@ -169,6 +171,13 @@ class UploadWorker(QObject):
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
         self._config = config
+        self._stop_requested = Event()
+
+    def request_stop(self) -> None:
+        self._stop_requested.set()
+
+    def should_stop(self) -> bool:
+        return self._stop_requested.is_set()
 
     def start(self) -> None:
         try:
@@ -179,7 +188,7 @@ class UploadWorker(QObject):
                 item_finished=self._emit_item_finished,
                 run_finished=self.finished.emit,
             )
-            run(self._config, callbacks=callbacks)
+            run(self._config, callbacks=callbacks, should_stop=self.should_stop)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -251,6 +260,7 @@ class UploadWindow(QMainWindow):
         self._login_in_progress = False
         self._has_saved_login = False
         self._login_reminder_shown = False
+        self._upload_stop_requested = False
         self._latest_run_dir: Path | None = None
         self._row_by_cell: dict[str, int] = {}
 
@@ -366,6 +376,9 @@ class UploadWindow(QMainWindow):
         self.clear_login_button.clicked.connect(self.clear_login_flow)
         self.start_button = QPushButton("开始上传")
         self.start_button.clicked.connect(self.start_upload)
+        self.stop_button = QPushButton("终止上传")
+        self.stop_button.clicked.connect(self.stop_upload)
+        self.stop_button.setEnabled(False)
         self.retry_init_button = QPushButton("重新初始化")
         self.retry_init_button.clicked.connect(self.start_runtime_initialization)
         self.retry_init_button.setVisible(False)
@@ -375,6 +388,7 @@ class UploadWindow(QMainWindow):
         actions.addWidget(self.login_button)
         actions.addWidget(self.clear_login_button)
         actions.addWidget(self.start_button)
+        actions.addWidget(self.stop_button)
         actions.addWidget(self.retry_init_button)
         actions.addWidget(self.open_report_button)
         actions.addStretch(1)
@@ -429,13 +443,32 @@ class UploadWindow(QMainWindow):
             and self._has_saved_login
         )
 
+    def _upload_in_progress(self) -> bool:
+        return self._thread is not None and self._thread.isRunning()
+
+    def _set_upload_stop_state(self, requested: bool) -> None:
+        self._upload_stop_requested = requested
+        self.stop_button.setEnabled(self._upload_in_progress() and not requested)
+
+    def _mark_pending_rows_as_cancelled(self) -> None:
+        for row in range(self.progress_table.rowCount()):
+            status_item = self.progress_table.item(row, 2)
+            if status_item is None or status_item.text() != STATUS_LABELS["pending"]:
+                continue
+            self._set_table_text(row, 2, STATUS_LABELS["cancelled"])
+            self._set_table_text(row, 3, "用户终止，未开始处理")
+
+    def _build_cancelled_summary(self, outcome: RunOutcome) -> str:
+        if outcome.processed_count == 0:
+            return f"已终止：本次未处理任何文件，未处理 {outcome.remaining_count} 个"
+        return f"已终止：{format_stats(outcome.stats)}，未处理 {outcome.remaining_count} 个"
+
     def _can_clear_login_state(self) -> bool:
-        upload_in_progress = self._thread is not None and self._thread.isRunning()
         return (
             self._runtime_ready
             and not self._runtime_initializing
             and not self._login_in_progress
-            and not upload_in_progress
+            and not self._upload_in_progress()
             and DEFAULT_STATE_FILE.resolve().exists()
         )
 
@@ -652,6 +685,7 @@ class UploadWindow(QMainWindow):
         self.progress_table.setRowCount(0)
         self.log_output.clear()
         self.summary_label.setText("准备开始上传。")
+        self._set_upload_stop_state(False)
         self.open_report_button.setEnabled(False)
         self._latest_run_dir = None
 
@@ -693,11 +727,23 @@ class UploadWindow(QMainWindow):
         self._worker.failed.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_worker)
         self._thread.start()
+        self.stop_button.setEnabled(True)
+
+    def stop_upload(self) -> None:
+        if self._thread is None or self._worker is None or self._upload_stop_requested:
+            return
+        self._worker.request_stop()
+        self._set_upload_stop_state(True)
+        self.append_log("[WARN] 已收到终止上传请求，将在当前文件处理完成后停止。")
+        self.summary_label.setText("正在等待当前文件处理完成后终止...")
 
     def on_run_started(self, plan: list[UploadPlanItem], run_dir: str) -> None:
         self._latest_run_dir = Path(run_dir)
         self.open_report_button.setEnabled(True)
-        self.summary_label.setText(f"已生成上传计划，共 {len(plan)} 个文件。")
+        if self._upload_stop_requested:
+            self.summary_label.setText("正在等待当前文件处理完成后终止...")
+        else:
+            self.summary_label.setText(f"已生成上传计划，共 {len(plan)} 个文件。")
         self.progress_table.setRowCount(len(plan))
         for row, item in enumerate(plan):
             self._row_by_cell[item.cell] = row
@@ -725,18 +771,27 @@ class UploadWindow(QMainWindow):
     def on_run_finished(self, outcome: RunOutcome) -> None:
         self._latest_run_dir = outcome.run_dir
         self.open_report_button.setEnabled(True)
-        self.summary_label.setText(f"完成：{format_stats(outcome.stats)}")
         self._runtime_ready = True
+        if outcome.cancelled:
+            self._mark_pending_rows_as_cancelled()
+            self.summary_label.setText(self._build_cancelled_summary(outcome))
+        else:
+            self.summary_label.setText(f"完成：{format_stats(outcome.stats)}")
+        self._set_upload_stop_state(False)
+        self.stop_button.setEnabled(False)
         self._set_form_enabled(True)
 
     def on_run_failed(self, message: str) -> None:
         self._runtime_ready = True
+        self._set_upload_stop_state(False)
+        self.stop_button.setEnabled(False)
         self._set_form_enabled(True)
         self.summary_label.setText("上传未能完成，请查看日志或稍后重试。")
         self.append_log(f"[ERROR] {message}")
         QMessageBox.critical(self, "上传失败", message)
 
     def _cleanup_worker(self) -> None:
+        self.stop_button.setEnabled(False)
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
@@ -780,7 +835,10 @@ class UploadWindow(QMainWindow):
             event.ignore()
             return
         if self._thread is not None and self._thread.isRunning():
-            QMessageBox.information(self, "任务仍在运行", "上传还在进行中，请等待任务结束后再关闭窗口。")
+            message = "上传还在进行中，请等待任务结束后再关闭窗口。"
+            if self._upload_stop_requested:
+                message = "正在等待当前文件处理完成后终止，请稍后再关闭窗口。"
+            QMessageBox.information(self, "任务仍在运行", message)
             event.ignore()
             return
         super().closeEvent(event)

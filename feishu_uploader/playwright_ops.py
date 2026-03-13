@@ -569,6 +569,7 @@ def upload_plan_item(
     login_timeout: int,
     run_dir: Path,
     log: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> UploadResult:
     if not plan_item.exists:
         result.status = "skipped_missing"
@@ -597,7 +598,7 @@ def upload_plan_item(
         except Exception as exc:
             result.reason = str(exc)
             recover_page_state(page)
-            if attempt >= max_attempts:
+            if attempt >= max_attempts or (should_stop is not None and should_stop()):
                 screenshot = take_failure_screenshot(page, run_dir, plan_item)
                 result.status = "failed"
                 result.screenshot = str(screenshot)

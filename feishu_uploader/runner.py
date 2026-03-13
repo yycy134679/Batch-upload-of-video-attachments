@@ -77,6 +77,10 @@ def _emit(callback: Callable[..., None] | None, *args: object) -> None:
         callback(*args)
 
 
+def _should_stop(should_stop: Callable[[], bool] | None) -> bool:
+    return bool(should_stop is not None and should_stop())
+
+
 def make_result(item: UploadPlanItem) -> UploadResult:
     return UploadResult(
         index=item.index,
@@ -88,7 +92,12 @@ def make_result(item: UploadPlanItem) -> UploadResult:
     )
 
 
-def run(config: AppConfig, callbacks: RunCallbacks | None = None) -> RunOutcome:
+def run(
+    config: AppConfig,
+    callbacks: RunCallbacks | None = None,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> RunOutcome:
     config = validate_config(config)
     callbacks = callbacks or RunCallbacks()
     ensure_playwright_available(log=callbacks.log, install=True)
@@ -102,74 +111,101 @@ def run(config: AppConfig, callbacks: RunCallbacks | None = None) -> RunOutcome:
 
     started_at = utc_now()
     results: list[UploadResult] = []
+    cancelled = False
+    total = len(plan)
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=config.headless)
-        context_options: dict[str, Any] = {
-            "viewport": {"width": 1440, "height": 900},
-        }
-        if config.state_file.exists():
-            context_options["storage_state"] = str(config.state_file)
-            _emit(callbacks.log, f"[INFO] 复用登录态: {config.state_file.name}")
+    if _should_stop(should_stop):
+        cancelled = True
+        _emit(callbacks.log, "[WARN] 已收到终止请求，本次上传将在开始处理前结束。")
+    else:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=config.headless)
+            context_options: dict[str, Any] = {
+                "viewport": {"width": 1440, "height": 900},
+            }
+            if config.state_file.exists():
+                context_options["storage_state"] = str(config.state_file)
+                _emit(callbacks.log, f"[INFO] 复用登录态: {config.state_file.name}")
 
-        context = browser.new_context(**context_options)
-        page = context.new_page()
-        try:
-            page.goto(config.url, wait_until="domcontentloaded")
-            wait_for_login(page, timeout_sec=config.login_timeout)
-            ensure_parent_dir(config.state_file)
-            context.storage_state(path=str(config.state_file))
-            _emit(callbacks.log, f"[INFO] 登录态已更新: {config.state_file.name}")
+            context = browser.new_context(**context_options)
+            page = context.new_page()
+            try:
+                page.goto(config.url, wait_until="domcontentloaded")
+                wait_for_login(page, timeout_sec=config.login_timeout)
+                ensure_parent_dir(config.state_file)
+                context.storage_state(path=str(config.state_file))
+                _emit(callbacks.log, f"[INFO] 登录态已更新: {config.state_file.name}")
 
-            total = len(plan)
-            for item in plan:
-                _emit(callbacks.item_started, item, total)
-                _emit(
-                    callbacks.log,
-                    f"[{item.index + 1}/{total}] {item.file_name} "
-                    f"({format_size(item.size_bytes)}) -> {item.cell}",
-                )
-                result = upload_plan_item(
-                    page,
-                    item,
-                    make_result(item),
-                    overwrite=config.overwrite,
-                    upload_timeout=config.upload_timeout,
-                    retries=config.retries,
-                    login_timeout=config.login_timeout,
-                    run_dir=run_dir,
-                    log=callbacks.log,
-                )
-                results.append(result)
-                _emit(callbacks.item_finished, result, total)
-                _emit(callbacks.log, f"  -> {result.status}")
-                if result.reason:
-                    _emit(callbacks.log, f"     reason: {result.reason}")
-                if result.screenshot:
-                    _emit(callbacks.log, f"     screenshot: {result.screenshot}")
-        finally:
-            browser.close()
+                for item in plan:
+                    if _should_stop(should_stop):
+                        cancelled = True
+                        _emit(
+                            callbacks.log,
+                            f"[WARN] 已收到终止请求，将在 {item.cell} 开始前结束本次上传。",
+                        )
+                        break
+
+                    _emit(callbacks.item_started, item, total)
+                    _emit(
+                        callbacks.log,
+                        f"[{item.index + 1}/{total}] {item.file_name} "
+                        f"({format_size(item.size_bytes)}) -> {item.cell}",
+                    )
+                    result = upload_plan_item(
+                        page,
+                        item,
+                        make_result(item),
+                        overwrite=config.overwrite,
+                        upload_timeout=config.upload_timeout,
+                        retries=config.retries,
+                        login_timeout=config.login_timeout,
+                        run_dir=run_dir,
+                        log=callbacks.log,
+                        should_stop=should_stop,
+                    )
+                    results.append(result)
+                    _emit(callbacks.item_finished, result, total)
+                    _emit(callbacks.log, f"  -> {result.status}")
+                    if result.reason:
+                        _emit(callbacks.log, f"     reason: {result.reason}")
+                    if result.screenshot:
+                        _emit(callbacks.log, f"     screenshot: {result.screenshot}")
+            finally:
+                browser.close()
 
     ended_at = utc_now()
+    processed_count = len(results)
+    remaining_count = max(total - processed_count, 0)
     summary_path = write_summary(
         run_dir,
         config,
         results,
         started_at=started_at,
         ended_at=ended_at,
+        cancelled=cancelled,
+        planned_count=total,
+        processed_count=processed_count,
+        remaining_count=remaining_count,
     )
     stats = build_summary(config, results)["stats"]
     has_errors = any(result.status in {"failed", "skipped_missing"} for result in results)
     outcome = RunOutcome(
-        exit_code=1 if has_errors else 0,
+        exit_code=130 if cancelled else (1 if has_errors else 0),
+        cancelled=cancelled,
         run_dir=run_dir,
         summary_path=summary_path,
         started_at=started_at,
         ended_at=ended_at,
+        planned_count=total,
+        processed_count=processed_count,
+        remaining_count=remaining_count,
         stats=stats,
         results=tuple(results),
     )
-    _emit(callbacks.log, f"完成，统计: {stats}")
+    if cancelled:
+        _emit(callbacks.log, f"已终止，统计: {stats}，未处理 {remaining_count} 个文件")
+    else:
+        _emit(callbacks.log, f"完成，统计: {stats}")
     _emit(callbacks.log, f"报告已写入: {summary_path}")
     _emit(callbacks.run_finished, outcome)
     return outcome

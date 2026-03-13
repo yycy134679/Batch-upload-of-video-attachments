@@ -69,9 +69,13 @@ class UploadResult:
 @dataclass(frozen=True)
 class RunOutcome:
     exit_code: int
+    cancelled: bool
     run_dir: Path
     summary_path: Path
     started_at: str
     ended_at: str
+    planned_count: int
+    processed_count: int
+    remaining_count: int
     stats: dict[str, int]
     results: tuple[UploadResult, ...]
